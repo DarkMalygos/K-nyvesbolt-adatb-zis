@@ -1,0 +1,437 @@
+CREATE utasítások:
+
+CREATE TABLE Konyvek (
+    konyv_id SERIAL PRIMARY KEY,
+    konyv_cim VARCHAR(50) NOT NULL,
+    konyv_elerheto BIT DEFAULT B'0',
+    darabszam INT NOT NULL,
+    szerzo VARCHAR(50) NOT NULL,
+    ar DECIMAL(5),
+    kiadas_datum DATE
+);
+
+
+
+Vásárlók tábla létrehozása és partícionálása:
+
+CREATE TABLE Vasarlok (
+    vasarlo_id SERIAL,
+    vasarlo_nev VARCHAR(50) NOT NULL,
+    varos VARCHAR(25),
+    utca VARCHAR(25),
+    hazszam VARCHAR(10),
+    iranyitoszam DECIMAL(4),
+    email VARCHAR(25) NOT NULL,
+    PRIMARY KEY (vasarlo_id, varos)
+)partition by list(varos);
+
+CREATE TABLE Vasarlok_Budapest PARTITION OF Vasarlok
+    FOR VALUES IN ('Budapest');
+
+CREATE TABLE Vasarlok_Debrecen PARTITION OF Vasarlok
+    FOR VALUES IN ('Debrecen');
+
+CREATE TABLE Vasarlok_Balassagyarmat PARTITION OF Vasarlok
+    FOR VALUES IN ('Balassagyarmat');
+
+CREATE TABLE Vasarlok_Default PARTITION OF Vasarlok
+    DEFAULT;
+
+
+
+
+CREATE TYPE rendeles_allapot_enum AS ENUM ('Folyamatban', 'Teljesitett', 'Visszavont');
+
+CREATE TABLE Rendelesek (
+    rendeles_id SERIAL PRIMARY KEY,
+    vasarlo_id INT,
+    varos VARCHAR(25),
+    rendeles_allapot rendeles_allapot_enum DEFAULT 'Folyamatban',
+    rendeles_datum DATE NOT NULL,
+    FOREIGN KEY (vasarlo_id, varos) REFERENCES Vasarlok(vasarlo_id, varos)
+);
+
+
+
+CREATE TABLE Tetelek (
+    rendeles_id INT REFERENCES Rendelesek(rendeles_id),
+    konyv_id INT REFERENCES Konyvek(konyv_id),
+    darabszam INT NOT NULL,
+    PRIMARY KEY (rendeles_id, konyv_id)
+);
+
+
+
+CREATE TABLE Szamlak (
+    szamla_id SERIAL PRIMARY KEY,
+    rendeles_id INT REFERENCES Rendelesek(rendeles_id),
+    szamla_teljesites_datuma DATE 
+    osszeg DECIMAL(10, 2) NOT NULL,
+);
+
+
+
+
+
+
+
+INSERT INTO utasítások (1-2 sorra):
+
+INSERT INTO Konyvek (konyv_cim, konyv_elerheto, darabszam, szerzo, ar, kiadas_datum)
+VALUES ('A Gyűrűk Ura', B'1', 5, 'J.R.R. Tolkien', 4999.99, '1954-07-29'), ('A Bölcs ember félelme', B'0', 10, 'Patrick Rothfuss', 5600.50, '2007-03-27');
+
+INSERT INTO Vasarlok(vasarlo_nev, varos, utca, hazszam, iranyitoszam, email)
+VALUES('Lakatos Péter', 'Budapest', 'Petőfi utca', 15, 1052, 'peter.lakatos@example.com'), ('Kovács József', 'Debrecen', 'Kossuth tér', 5, 4026, 'jozsef.kovacs@example.com');
+
+INSERT INTO Rendelesek(vasarlo_id, varos, rendeles_allapot, rendeles_datum) 
+VALUES(1, 'Budapest', 'Teljesitett', '2024-11-30'), (2, 'Debrecen', 'Teljesitett', '2024-12-01');
+
+INSERT INTO Tetelek(rendeles_id, konyv_id, darabszam) 
+VALUES (1, 2, 1), (2, 1, 2);
+
+INSERT INTO Szamlak (rendeles_id, szamla_teljesites_datuma, osszeg)
+VALUES (2, '2024-12-04', 5600.50);
+
+
+
+
+
+
+
+Lekérdezések:
+
+
+
+Könyvek elérhetőek-e:
+
+SELECT konyv_cim, szerzo, ar, darabszam,
+CASE WHEN konyv_elerheto = B'1' THEN 'Elérhető' ELSE 'Nem elérhető' END AS elerhetoseg
+FROM Konyvek;
+
+
+
+Vásárlók vásárlási előzményei:
+
+SELECT V.vasarlo_nev, V.email, R.rendeles_datum, T.darabszam, K.konyv_cim
+FROM Vasarlok V
+JOIN Rendelesek R ON V.vasarlo_id = R.vasarlo_id AND V.varos = R.varos
+JOIN Tetelek T ON R.rendeles_id = T.rendeles_id
+JOIN Konyvek K ON T.konyv_id = K.konyv_id
+ORDER BY V.vasarlo_nev, R.rendeles_datum;
+
+
+
+Rendelések státusza:
+
+SELECT R.rendeles_id, V.vasarlo_nev, V.email, R.rendeles_allapot
+FROM Rendelesek R
+JOIN Vasarlok V ON R.vasarlo_id = V.vasarlo_id AND R.varos = V.varos
+ORDER BY R.rendeles_datum DESC;
+
+
+
+
+
+
+
+Trigger megírása függvénnyel:
+
+CREATE OR REPLACE FUNCTION konyv_keszlet_frissitese() RETURNS TRIGGER AS $$
+BEGIN
+    IF (SELECT darabszam FROM Konyvek WHERE konyv_id = NEW.konyv_id) < NEW.darabszam THEN
+        RAISE EXCEPTION 'Nincsen elegendo mennyiseg a konyv_id %', NEW.konyv_id;
+    END IF;
+    IF EXISTS (SELECT 1 FROM Rendelesek WHERE rendeles_id = NEW.rendeles_id AND rendeles_allapot = 'Teljesitett') THEN
+    	UPDATE Konyvek
+    	SET darabszam = darabszam - NEW.darabszam
+    	WHERE konyv_id = NEW.konyv_id;
+
+        UPDATE Konyvek
+        SET konyv_elerheto = B'0'
+        WHERE konyv_id = NEW.konyv_id AND darabszam <= 0;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_konyv_keszlet_frissites
+AFTER INSERT ON Tetelek
+FOR EACH ROW
+EXECUTE FUNCTION konyv_keszlet_frissitese();
+
+Trigger meghívása:
+
+INSERT INTO Tetelek(rendeles_id, konyv_id, darabszam) VALUES(1, 2, 1);
+
+
+
+
+
+
+
+Tárolt eljárások:
+
+Legjobban fogyó könyvek tárolt eljárása:
+
+CREATE OR REPLACE PROCEDURE legjobban_fogyo_konyvek_statisztika_procedure(limit_szam INT DEFAULT 10)
+LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        DROP TABLE IF EXISTS legjobban_fogyo_konyvek_temporary_tabla;
+    EXCEPTION WHEN undefined_table THEN
+        NULL;
+    END;
+
+    CREATE TEMP TABLE legjobban_fogyo_konyvek_temporary_tabla (
+        konyv_id INT,
+        konyv_cim TEXT,
+        osszes_eladott INT
+    ) ON COMMIT PRESERVE ROWS;
+
+    INSERT INTO legjobban_fogyo_konyvek_temporary_tabla (konyv_id, konyv_cim, osszes_eladott)
+    SELECT 
+        k.konyv_id,
+        k.konyv_cim,
+        SUM(t.darabszam)::INT AS osszes_eladott
+    FROM Tetelek t
+    JOIN Konyvek k ON t.konyv_id = k.konyv_id
+    GROUP BY k.konyv_id, k.konyv_cim
+    ORDER BY osszes_eladott DESC
+    LIMIT limit_szam;
+
+    RAISE NOTICE 'A tábla elkészült a statisztikával.';
+END;
+$$;
+
+Tárolt eljárás meghívása:
+
+CALL legjobban_fogyo_konyvek_statisztika_procedure(2);
+SELECT * FROM legjobban_fogyo_konyvek_temporary_tabla;
+
+
+
+Legaktívabb vásárlók tárolt eljárása:
+
+CREATE OR REPLACE PROCEDURE legaktivabb_vasarlok_procedure(limit_szam INT DEFAULT 10)
+LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        DROP TABLE IF EXISTS legaktivabb_vasarlok_temporary_table;
+    EXCEPTION WHEN undefined_table THEN
+        NULL;
+    END;
+
+    CREATE TEMP TABLE legaktivabb_vasarlok_temporary_table (
+        vasarlo_id INT,
+        vasarlo_nev TEXT,
+        osszes_eladott INT
+    ) ON COMMIT PRESERVE ROWS;
+
+    INSERT INTO legaktivabb_vasarlok_temporary_table (vasarlo_id, vasarlo_nev, osszes_eladott)
+    SELECT 
+        v.vasarlo_id,
+        v.vasarlo_nev,
+        COUNT(r.rendeles_id)::INT AS osszes_eladott
+    FROM Rendelesek r
+    JOIN Vasarlok v ON r.vasarlo_id = v.vasarlo_id
+    GROUP BY v.vasarlo_id, v.vasarlo_nev
+    ORDER BY osszes_eladott DESC
+    LIMIT limit_szam;
+
+    RAISE NOTICE 'A tábla elkészült a statisztikával.';
+END;
+$$;
+
+Tárolt eljárás meghívása:
+
+CALL legaktivabb_vasarlok_procedure(2);
+SELECT * FROM legaktivabb_vasarlok_temporary_table;
+
+
+
+Számla generálásának a tárolt eljárása:
+
+CREATE OR REPLACE PROCEDURE generate_invoice()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    osszeg_total DECIMAL(10, 2);
+    rendeles_id_bemenet INT;
+    szamla_letezik BOOLEAN;
+BEGIN
+    FOR rendeles_id_bemenet IN 
+        SELECT rendeles_id 
+        FROM Rendelesek 
+        WHERE rendeles_allapot = 'Teljesitett'
+    LOOP
+        SELECT EXISTS (
+            SELECT 1 FROM Szamlak WHERE rendeles_id = rendeles_id_bemenet
+        ) INTO szamla_letezik;
+
+        IF szamla_letezik THEN
+            RAISE NOTICE 'Ezzel a számú rendeléssel (%), számla már létezik.', rendeles_id_bemenet;
+            CONTINUE;
+        END IF;
+        SELECT SUM(k.ar * t.darabszam)
+        INTO osszeg_total
+        FROM Tetelek t
+        JOIN Konyvek k ON t.konyv_id = k.konyv_id
+        WHERE t.rendeles_id = rendeles_id_bemenet;
+
+        IF osszeg_total IS NULL THEN
+            RAISE NOTICE 'Az adott rendelés (%), tételekkel nem rendelkezik.', rendeles_id_bemenet;
+            CONTINUE;
+        END IF;
+
+        INSERT INTO Szamlak (rendeles_id, osszeg, szamla_teljesites_datuma)
+        VALUES (rendeles_id_bemenet, osszeg_total, CURRENT_DATE);
+
+        RAISE NOTICE 'Számla generálva: %, összeg: %', rendeles_id_bemenet, osszeg_total;
+    END LOOP;
+END;
+$$;
+
+Tárolt eljárás meghívása:
+
+CALL generate_invoice();
+
+
+
+
+
+
+
+Táblák feltöltése 10000 rekordal:
+
+INSERT INTO Konyvek (konyv_cim, konyv_elerheto, darabszam, szerzo, ar, kiadas_datum)
+SELECT
+    'Könyv_' || i AS konyv_cim,
+    B'1' AS konyv_elerheto, 
+    (10000 + (i % 50)) AS darabszam,
+    'Szerző_' || i AS szerzo,
+    (1000 + (i % 500))::DECIMAL(7, 2) AS ar,
+    CURRENT_DATE - (i % 365) AS kiadas_datum 
+FROM generate_series(1, 10000) AS i;
+
+
+
+INSERT INTO Vasarlok (vasarlo_nev, varos, utca, hazszam, iranyitoszam, email)
+SELECT 
+    'Vásárló_' || i AS vasarlo_nev,
+    CASE WHEN (i % 4) = 0 THEN 'Budapest' 
+         WHEN (i % 4) = 1 THEN 'Debrecen'
+         WHEN (i % 4) = 2 THEN 'Balassagyarmat'
+         ELSE 'Pécs' END AS varos,
+    'Utca_' || i AS utca,
+    (i % 100)::VARCHAR(10) AS hazszam,
+    (1000 + (i % 9000))::NUMERIC(4) AS iranyitoszam, 
+    'email_' || i || '@example.com' AS email
+FROM generate_series(1, 10000) AS i;
+
+
+
+INSERT INTO Rendelesek (vasarlo_id, varos, rendeles_allapot, rendeles_datum)
+SELECT 
+    v.vasarlo_id,
+    v.varos,
+    CASE 
+        WHEN (i % 4) = 0 THEN 'Teljesitett'::rendeles_allapot_enum
+        WHEN (i % 4) = 1 THEN 'Folyamatban'::rendeles_allapot_enum
+        ELSE 'Visszavont'::rendeles_allapot_enum
+    END AS rendeles_allapot,
+    CURRENT_DATE - (i % 365) AS rendeles_datum
+FROM generate_series(0, 9999) AS i
+JOIN Vasarlok v ON v.vasarlo_id = ((i % (SELECT COUNT(*) FROM Vasarlok)) + 1);
+
+
+
+INSERT INTO Tetelek (rendeles_id, konyv_id, darabszam)
+SELECT 
+    (i % 10000) + 3 AS rendeles_id,
+    (i % 500) + 1 AS konyv_id, 
+    LEAST((random() * 10 + 1)::INT, k.darabszam) AS darabszam
+FROM generate_series(1, 10000) AS i
+JOIN Konyvek k ON k.konyv_id = (i % 500) + 1
+WHERE LEAST((random() * 10 + 1)::INT, k.darabszam) <= k.darabszam
+ORDER BY rendeles_id;
+
+
+
+Szamlak tábla feltöltése a már korábban megírt "generate_invoice()" tárolt eljárással:
+
+CREATE OR REPLACE PROCEDURE generate_invoice()
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    osszeg_total DECIMAL(10, 2);
+    rendeles_id_bemenet INT;
+    szamla_letezik BOOLEAN;
+BEGIN
+    FOR rendeles_id_bemenet IN 
+        SELECT rendeles_id 
+        FROM Rendelesek 
+        WHERE rendeles_allapot = 'Teljesitett'
+    LOOP
+        SELECT EXISTS (
+            SELECT 1 FROM Szamlak WHERE rendeles_id = rendeles_id_bemenet
+        ) INTO szamla_letezik;
+
+        IF szamla_letezik THEN
+            RAISE NOTICE 'Ezzel a számú rendeléssel (%), számla már létezik.', rendeles_id_bemenet;
+            CONTINUE;
+        END IF;
+        SELECT SUM(k.ar * t.darabszam)
+        INTO osszeg_total
+        FROM Tetelek t
+        JOIN Konyvek k ON t.konyv_id = k.konyv_id
+        WHERE t.rendeles_id = rendeles_id_bemenet;
+
+        IF osszeg_total IS NULL THEN
+            RAISE NOTICE 'Az adott rendelés (%), tételekkel nem rendelkezik.', rendeles_id_bemenet;
+            CONTINUE;
+        END IF;
+
+        INSERT INTO Szamlak (rendeles_id, osszeg, szamla_teljesites_datuma)
+        VALUES (rendeles_id_bemenet, osszeg_total, CURRENT_DATE);
+
+        RAISE NOTICE 'Számla generálva: %, összeg: %', rendeles_id_bemenet, osszeg_total;
+    END LOOP;
+END;
+$$;
+
+
+
+
+
+
+
+Teljesítmény analízis (Indexelés előtt és után):
+
+Parciális Index létrehozása:
+
+CREATE INDEX part_idx_rendelesek_teljesitett ON Rendelesek(rendeles_id, vasarlo_id, varos, rendeles_allapot)
+WHERE rendeles_allapot = 'Teljesitett';
+
+EXPLAIN ANALYZE
+SELECT 
+    v.vasarlo_nev,
+    v.varos,
+    r.rendeles_datum,
+    k.konyv_cim,
+    k.ar,
+    r.rendeles_allapot,
+    s.osszeg
+FROM 
+    Vasarlok v
+JOIN 
+    Rendelesek r ON v.vasarlo_id = r.vasarlo_id AND v.varos = r.varos
+JOIN 
+    Tetelek t ON r.rendeles_id = t.rendeles_id
+JOIN 
+    Konyvek k ON t.konyv_id = k.konyv_id
+JOIN 
+    Szamlak s ON r.rendeles_id = s.rendeles_id
+WHERE 
+    r.rendeles_allapot = 'Teljesitett'
+ORDER BY 
+    r.rendeles_datum DESC;
